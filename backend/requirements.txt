@@ -1,0 +1,11 @@
+google-generativeai
+SpeechRecognition
+googletrans==4.0.0-rc1
+gtts
+pygame
+Pillow
+flask
+flask-cors
+requests
+beautifulsoup4
+pydub
