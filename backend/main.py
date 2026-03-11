@@ -1,9 +1,11 @@
+import os
 import sys
-import google.generativeai as genai
+from groq import Groq
+from huggingface_hub import InferenceClient
 import speech_recognition as sr
-from googletrans import Translator
+from deep_translator import GoogleTranslator
 from gtts import gTTS
-import pygame
+#import pygame
 from PIL import Image
 import os
 import tempfile
@@ -32,17 +34,26 @@ except Exception as e:
 warnings.filterwarnings("ignore")
 
 class MultilingualFarmerAgent:
-    def __init__(self, gemini_api_key):
-        # Initialize Gemini
-        genai.configure(api_key=gemini_api_key)
-        self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
-
-        # Initialize other services
-        self.translator = Translator()
+    def __init__(self, groq_api_key=None, hf_token=None):
+        # Initialize API clients (both 100% free)
+        self.groq_key = groq_api_key or os.getenv("GROQ_API_KEY")
+        self.hf_token = hf_token or os.getenv("HF_TOKEN")
+        
+        # Groq for text (fast, free, unlimited)
+        self.groq_client = Groq(api_key=self.groq_key) if self.groq_key else None
+        
+        # Hugging Face for images (free, no billing)
+        self.hf_client = InferenceClient(token=self.hf_token) if self.hf_token else None
+        
         self.recognizer = sr.Recognizer()
-
+        
+        print("✅ API Clients initialized (100% FREE)")
+        if self.groq_client:
+            print("  - Groq: Active (Text queries)")
+        if self.hf_client:
+            print("  - Hugging Face: Active (Image analysis)")
         # Initialize pygame for audio playback
-        pygame.mixer.init()
+        #pygame.mixer.init()
 
         # Updated language mapping to match Flutter app
         self.supported_languages = {
@@ -75,7 +86,116 @@ class MultilingualFarmerAgent:
             'ଓଡ଼ିଆ': 'or',
             'اردو': 'ur'
         }
-
+        # New model wrapper
+    def _generate_content(self, prompt, image_path=None, max_retries=3):
+        """Generate content with Groq (text) and Hugging Face (images) - 100% FREE"""
+        
+        # For text queries - use Groq (super fast, free)
+        if not image_path and self.groq_client:
+            try:
+                print("🔄 Using Groq API (free)...")
+                response = self.groq_client.chat.completions.create(
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are Krishi Mitra, an expert agricultural advisor for Indian farmers. Provide accurate, practical advice in the requested language."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    model="llama-3.3-70b-versatile",  # Best free model
+                    temperature=0.7,
+                    max_tokens=2000
+                )
+                print("✅ Groq response received")
+                return response.choices[0].message.content
+                
+            except Exception as e:
+                print(f"⚠️ Groq failed: {e}")
+        
+        # For image queries - use Hugging Face (free vision models)
+        if image_path and self.hf_client:
+            try:
+                print("🔄 Using Hugging Face Vision API (free)...")
+                
+                # Convert image to base64
+                import base64
+                with open(image_path, 'rb') as img_file:
+                    image_bytes = img_file.read()
+                
+                # Use Hugging Face's free vision-language model
+                # First, get image description
+                try:
+                    # Use BLIP-2 for image captioning (free)
+                    caption_response = self.hf_client.image_to_text(
+                        image_bytes,
+                        model="Salesforce/blip-image-captioning-large"
+                    )
+                    image_description = caption_response
+                    print(f"✅ Image analyzed: {image_description}")
+                    
+                    # Now use Groq with the image description + prompt
+                    combined_prompt = f"""
+                    IMAGE ANALYSIS: {image_description}
+                    
+                    {prompt}
+                    
+                    Based on the image analysis above, provide your expert agricultural advice.
+                    """
+                    
+                    if self.groq_client:
+                        response = self.groq_client.chat.completions.create(
+                            messages=[
+                                {
+                                    "role": "system",
+                                    "content": "You are Krishi Mitra, an expert agricultural advisor. Analyze crop images and provide advice."
+                                },
+                                {
+                                    "role": "user",
+                                    "content": combined_prompt
+                                }
+                            ],
+                            model="llama-3.3-70b-versatile",
+                            temperature=0.7,
+                            max_tokens=2000
+                        )
+                        print("✅ Combined image+text response received")
+                        return response.choices[0].message.content
+                    
+                except Exception as img_error:
+                    print(f"⚠️ Image analysis failed: {img_error}")
+                    
+            except Exception as e:
+                print(f"⚠️ Hugging Face failed: {e}")
+        
+        # Fallback: Use Groq text-only
+        if self.groq_client:
+            try:
+                print("🔄 Fallback to Groq text-only...")
+                response = self.groq_client.chat.completions.create(
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are Krishi Mitra, an agricultural expert."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    model="llama-3.3-70b-versatile",
+                    temperature=0.7,
+                    max_tokens=2000
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                print(f"⚠️ Fallback failed: {e}")
+        
+        # If everything fails
+        return "सेवा अस्थायी रूप से अनुपलब्ध है। कृपया बाद में प्रयास करें। (Service temporarily unavailable)"
+    
     def get_language_code_from_name(self, language_name):
         """Convert language name to language code"""
         return self.language_name_to_code.get(language_name, 'en')
@@ -374,8 +494,8 @@ class MultilingualFarmerAgent:
                         # Translate to target language if needed
                         if language_code != 'en':
                             try:
-                                translated = self.translator.translate(text, dest=language_code)
-                                return f"{text} (Translated: {translated.text})"
+                               translated=GoogleTranslator(source='auto', target=language_code).translate(text)
+                               return f"{text} (Translated: {translated})"
                             except:
                                 return text
                         return text.strip()
@@ -643,12 +763,12 @@ class MultilingualFarmerAgent:
                 print(enhanced_prompt)
                 print("------------------------------")
 
-                response = self.model.generate_content(enhanced_prompt)
-                response_text = response.text
+                response_text = self._generate_content(enhanced_prompt)
 
                 # If the response contains English, try to translate it
-                if any(char.isascii() and char.isalpha() for char in response_text):
-                    print(f"⚠️ Response contains English, attempting translation to {lang_name}")
+# Skip translation check entirely for English target language
+                if target_language != 'en' and response_text.isascii():
+                    print(f"⚠️ Response is ASCII-only, attempting translation to {lang_name}")
                     try:
                         translated = self.translator.translate(response_text, dest=target_language)
                         return translated.text
@@ -719,11 +839,12 @@ class MultilingualFarmerAgent:
         START YOUR RESPONSE IN {lang_name} NOW:
         """
             print(enhanced_prompt)
-            response = self.model.generate_content([enhanced_prompt, image])
-            response_text = response.text
+            response_text = self._generate_content(enhanced_prompt, image_path=image_path)
 
             # Translation fallback if needed
-            if any(char.isascii() and char.isalpha() for char in response_text):
+            # Skip translation check entirely for English target language
+            if target_language != 'en' and response_text.isascii():
+                print(f"⚠️ Response is ASCII-only, attempting translation to {lang_name}")
                 try:
                     translated = self.translator.translate(response_text, dest=target_language)
                     return translated.text
@@ -995,8 +1116,10 @@ app = Flask(__name__)
 CORS(app)  # Enable CORS for Flutter app
 
 # Initialize the agent
-API_KEY = "AIzaSyAH7t8UXSLD6oIvSa9QWcOqDLdB42EbiuQ"
-agent = MultilingualFarmerAgent(API_KEY)
+# Initialize the agent with multiple API keys
+GROQ_KEY = os.getenv("GROQ_API_KEY")
+HF_TOKEN = os.getenv("HF_TOKEN")
+agent = MultilingualFarmerAgent(groq_api_key=GROQ_KEY, hf_token=HF_TOKEN)
 
 # ====== BASIC ROUTES ======
 @app.route('/health', methods=['GET'])
@@ -1237,10 +1360,12 @@ if __name__ == "__main__":
     print("\n🚀 Server is now running and waiting for requests...\n")
 
     # Start the Flask app
+    port = int(os.environ.get('PORT', 5000))
+
     app.run(
         host='0.0.0.0',
-        port=5000,
-        debug=True,  # Changed to True for better error messages
+        port=port,
+        debug=False,  # Changed to True for better error messages
         threaded=True,
         use_reloader=False  # Prevent double loading
     )
