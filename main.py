@@ -86,12 +86,13 @@ class MultilingualFarmerAgent:
             'ଓଡ଼ିଆ': 'or',
             'اردو': 'ur'
         }
-        def _generate_content(self, prompt, image_path=None, max_retries=3):
-            """
-            - Image queries  → Groq llama-4-scout (vision, sees image directly)
-            - Text queries   → Groq llama-3.3-70b-versatile
-            """
- 
+
+    def _generate_content(self, prompt, image_path=None, max_retries=3):
+        """
+        - Image queries  → Groq llama-4-scout (vision, sees image directly)
+        - Text queries   → Groq llama-3.3-70b-versatile
+        """
+
         # ── IMAGE: send base64 directly to Groq vision ───────────────
         if image_path and self.groq_client:
             try:
