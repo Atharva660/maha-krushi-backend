@@ -88,15 +88,64 @@ class MultilingualFarmerAgent:
         }
     def _generate_content(self, prompt, image_path=None, max_retries=3):
         """
-        Generate content with Groq (text) and Hugging Face (images).
-        
-        Key fix: image pipeline now does TWO BLIP passes (captioning + VQA)
-        and stitches the results into a richer description that the LLM
-        must use as the ONLY source of truth for crop identification.
+        Generate content using Groq.
+        - Text queries  → llama-3.3-70b-versatile
+        - Image queries → llama-3.2-11b-vision-preview  (FREE Groq vision model)
+          Image is sent directly as base64 — no HuggingFace VQA needed.
         """
-        
-        # ── TEXT-ONLY PATH (fast, no image) ─────────────────────────────────
-        if not image_path and self.groq_client:
+ 
+        # ── IMAGE PATH: use Groq vision model directly ───────────────────
+        if image_path and self.groq_client:
+            try:
+                print("🔄 Using Groq Vision API (llama-3.2-11b-vision-preview)...")
+ 
+                img_base64 = self._image_to_base64(image_path)
+ 
+                if img_base64:
+                    response = self.groq_client.chat.completions.create(
+                        model="meta-llama/llama-4-scout-17b-16e-instruct",
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are Krishi Mitra, an expert agricultural advisor for Indian farmers. "
+                                    "You can directly see and analyse crop images. "
+                                    "Always identify the exact plant/crop visible in the image. "
+                                    "Never say the plant is unidentifiable if it is clearly visible. "
+                                    "Give practical, actionable farming advice."
+                                )
+                            },
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/jpeg;base64,{img_base64}"
+                                        }
+                                    },
+                                    {
+                                        "type": "text",
+                                        "text": prompt
+                                    }
+                                ]
+                            }
+                        ],
+                        temperature=0.5,
+                        max_tokens=2000
+                    )
+                    print("✅ Groq Vision response received")
+                    return response.choices[0].message.content
+ 
+                else:
+                    print("⚠️ Image conversion failed, falling back to text-only")
+ 
+            except Exception as e:
+                print(f"⚠️ Groq Vision failed: {e}")
+                print("🔄 Falling back to text-only Groq...")
+ 
+        # ── TEXT-ONLY PATH ───────────────────────────────────────────────
+        if self.groq_client:
             try:
                 print("🔄 Using Groq API (text-only)...")
                 response = self.groq_client.chat.completions.create(
@@ -117,142 +166,10 @@ class MultilingualFarmerAgent:
                 )
                 print("✅ Groq text response received")
                 return response.choices[0].message.content
-            
+ 
             except Exception as e:
                 print(f"⚠️ Groq text failed: {e}")
-        
-        # ── IMAGE PATH ───────────────────────────────────────────────────────
-        if image_path and self.hf_client:
-            try:
-                print("🔄 Analysing image with Hugging Face (enhanced pipeline)...")
-        
-                with open(image_path, "rb") as img_file:
-                    image_bytes = img_file.read()
-        
-                # ── Pass 1: General caption ──────────────────────────────
-                try:
-                    caption_result = self.hf_client.image_to_text(
-                        image_bytes,
-                        model="Salesforce/blip-image-captioning-large"
-                    )
-                    # BLIP returns a string directly
-                    general_caption = (
-                        caption_result
-                        if isinstance(caption_result, str)
-                        else getattr(caption_result, "generated_text", str(caption_result))
-                    )
-                    print(f"📷 BLIP caption: {general_caption}")
-                except Exception as blip_err:
-                    print(f"⚠️ BLIP caption failed: {blip_err}")
-                    general_caption = ""
-        
-                # ── Pass 2: VQA – ask specific plant-identity questions ───
-                vqa_answers = {}
-                vqa_questions = [
-                    ("What type of plant or tree is shown in this image?",        "plant_type"),
-                    ("What is the color and shape of the leaves?",                 "leaf_desc"),
-                    ("Are there any fruits, flowers, or pods visible?",            "fruit_flower"),
-                    ("Does the plant show any disease, spots, or yellowing?",      "health"),
-                    ("What is the overall size — small herb, shrub, or tall tree?","size"),
-                ]
-        
-                if self.hf_client:
-                    for question, key in vqa_questions:
-                        try:
-                            answer = self.hf_client.visual_question_answering(
-                                image=image_bytes,
-                                question=question,
-                                model="dandelin/vilt-b32-finetuned-vqa"
-                            )
-                            # answer is a list of dicts [{"answer": ..., "score": ...}]
-                            if isinstance(answer, list) and answer:
-                                best = max(answer, key=lambda x: x.get("score", 0))
-                                vqa_answers[key] = best.get("answer", "unknown")
-                            elif isinstance(answer, dict):
-                                vqa_answers[key] = answer.get("answer", "unknown")
-                            else:
-                                vqa_answers[key] = str(answer)
-                            print(f"  VQA [{key}]: {vqa_answers[key]}")
-                        except Exception as vqa_err:
-                            print(f"  ⚠️ VQA [{key}] failed: {vqa_err}")
-                            vqa_answers[key] = "unable to determine"
-        
-                # ── Build a rich structured image description ─────────────
-                image_description = f"""
-STRICT IMAGE EVIDENCE (derived directly from the uploaded photograph):
-  General scene  : {general_caption if general_caption else 'Not available'}
-  Plant / tree   : {vqa_answers.get('plant_type', 'Not determined')}
-  Leaf details   : {vqa_answers.get('leaf_desc', 'Not determined')}
-  Fruit / flowers: {vqa_answers.get('fruit_flower', 'Not determined')}
-  Plant health   : {vqa_answers.get('health', 'Not determined')}
-  Plant size     : {vqa_answers.get('size', 'Not determined')}
-""".strip()
-        
-                print(f"\n📋 Compiled image description:\n{image_description}\n")
-        
-                # ── Now call Groq with a prompt that ENFORCES the evidence ─
-                if self.groq_client:
-                    combined_prompt = f"""
-{image_description}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CRITICAL INSTRUCTION — READ BEFORE RESPONDING:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-You MUST identify the crop or plant using ONLY the evidence listed above.
-Do NOT assume, guess, or name any crop (e.g. soybean, wheat, rice) that
-is NOT explicitly supported by the image evidence above.
-If the evidence says "mango tree", "large leafy tree", "tree with oval
-green leaves and yellow fruit" — then it IS a mango tree.
-If the plant type is unclear, say so honestly and advise the farmer to
-consult a local expert rather than naming a random crop.
-
-━━━━━━━━━━━━━━━━━
-FARMER'S QUESTION:
-━━━━━━━━━━━━━━━━━
-{prompt}
-
-Now answer the farmer's question based on the image evidence above.
-"""
-                    response = self.groq_client.chat.completions.create(
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": (
-                                    "You are Krishi Mitra, an expert agricultural advisor. "
-                                    "You only identify crops from DIRECT IMAGE EVIDENCE provided "
-                                    "to you. You never hallucinate or assume crop types. "
-                                    "If image evidence is ambiguous, you say so clearly."
-                                )
-                            },
-                            {"role": "user", "content": combined_prompt}
-                        ],
-                        model="llama-3.3-70b-versatile",
-                        temperature=0.5,
-                        max_tokens=2000
-                    )
-                    print("✅ Combined image+text response received")
-                    return response.choices[0].message.content
-        
-            except Exception as e:
-                print(f"⚠️ Image pipeline failed: {e}")
-        
-        # ── FALLBACK: text-only ──────────────────────────────────────────────
-        if self.groq_client:
-            try:
-                print("🔄 Fallback to Groq text-only...")
-                response = self.groq_client.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": "You are Krishi Mitra, an agricultural expert."},
-                        {"role": "user",   "content": prompt}
-                    ],
-                    model="llama-3.3-70b-versatile",
-                    temperature=0.7,
-                    max_tokens=2000
-                )
-                return response.choices[0].message.content
-            except Exception as e:
-                print(f"⚠️ Fallback failed: {e}")
-        
+ 
         return "सेवा अस्थायी रूप से अनुपलब्ध है। कृपया बाद में प्रयास करें। (Service temporarily unavailable)"
     
     def get_language_code_from_name(self, language_name):
