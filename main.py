@@ -86,69 +86,71 @@ class MultilingualFarmerAgent:
             'ଓଡ଼ିଆ': 'or',
             'اردو': 'ur'
         }
-    def _generate_content(self, prompt, image_path=None, max_retries=3):
-        """
-        Generate content using Groq.
-        - Text queries  → llama-3.3-70b-versatile
-        - Image queries → llama-3.2-11b-vision-preview  (FREE Groq vision model)
-          Image is sent directly as base64 — no HuggingFace VQA needed.
-        """
+        def _generate_content(self, prompt, image_path=None, max_retries=3):
+            """
+            - Image queries  → Groq llama-4-scout (vision, sees image directly)
+            - Text queries   → Groq llama-3.3-70b-versatile
+            """
  
-        # ── IMAGE PATH: use Groq vision model directly ───────────────────
+        # ── IMAGE: send base64 directly to Groq vision ───────────────
         if image_path and self.groq_client:
             try:
-                print("🔄 Using Groq Vision API (llama-3.2-11b-vision-preview)...")
+                print("🔄 Using Groq Vision (llama-4-scout)...")
  
-                img_base64 = self._image_to_base64(image_path)
+                with open(image_path, "rb") as f:
+                    img_b64 = base64.b64encode(f.read()).decode("utf-8")
  
-                if img_base64:
-                    response = self.groq_client.chat.completions.create(
-                        model="meta-llama/llama-4-scout-17b-16e-instruct",
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": (
-                                    "You are Krishi Mitra, an expert agricultural advisor for Indian farmers. "
-                                    "You can directly see and analyse crop images. "
-                                    "Always identify the exact plant/crop visible in the image. "
-                                    "Never say the plant is unidentifiable if it is clearly visible. "
-                                    "Give practical, actionable farming advice."
-                                )
-                            },
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:image/jpeg;base64,{img_base64}"
-                                        }
-                                    },
-                                    {
-                                        "type": "text",
-                                        "text": prompt
-                                    }
-                                ]
-                            }
-                        ],
-                        temperature=0.5,
-                        max_tokens=2000
-                    )
-                    print("✅ Groq Vision response received")
-                    return response.choices[0].message.content
+                # detect mime type
+                ext = os.path.splitext(image_path)[-1].lower()
+                mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
+                        "png": "image/png", "webp": "image/webp"}.get(ext.lstrip("."), "image/jpeg")
  
-                else:
-                    print("⚠️ Image conversion failed, falling back to text-only")
+                response = self.groq_client.chat.completions.create(
+                    model="meta-llama/llama-4-scout-17b-16e-instruct",
+                    temperature=0.5,
+                    max_tokens=2000,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are Krishi Mitra, an expert agricultural advisor for Indian farmers. "
+                                "You can see and analyse crop images directly. "
+                                "ALWAYS identify the exact plant or crop visible in the image. "
+                                "If you can see a mango tree — say mango tree. "
+                                "If you can see a banana plant — say banana plant. "
+                                "NEVER say the plant is unidentifiable if it is clearly visible. "
+                                "Give practical, actionable farming advice."
+                            )
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:{mime};base64,{img_b64}"}
+                                },
+                                {
+                                    "type": "text",
+                                    "text": prompt
+                                }
+                            ]
+                        }
+                    ]
+                )
+                print("✅ Groq Vision response received")
+                return response.choices[0].message.content
  
             except Exception as e:
-                print(f"⚠️ Groq Vision failed: {e}")
-                print("🔄 Falling back to text-only Groq...")
+                print(f"⚠️ Groq Vision failed: {e}, falling back to text-only")
  
-        # ── TEXT-ONLY PATH ───────────────────────────────────────────────
+        # ── TEXT ONLY ────────────────────────────────────────────────
         if self.groq_client:
             try:
-                print("🔄 Using Groq API (text-only)...")
+                print("🔄 Using Groq text-only...")
                 response = self.groq_client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    temperature=0.7,
+                    max_tokens=2000,
                     messages=[
                         {
                             "role": "system",
@@ -159,10 +161,7 @@ class MultilingualFarmerAgent:
                             )
                         },
                         {"role": "user", "content": prompt}
-                    ],
-                    model="llama-3.3-70b-versatile",
-                    temperature=0.7,
-                    max_tokens=2000
+                    ]
                 )
                 print("✅ Groq text response received")
                 return response.choices[0].message.content
@@ -171,7 +170,7 @@ class MultilingualFarmerAgent:
                 print(f"⚠️ Groq text failed: {e}")
  
         return "सेवा अस्थायी रूप से अनुपलब्ध है। कृपया बाद में प्रयास करें। (Service temporarily unavailable)"
-    
+ 
     def get_language_code_from_name(self, language_name):
         """Convert language name to language code"""
         return self.language_name_to_code.get(language_name, 'en')
@@ -759,37 +758,31 @@ class MultilingualFarmerAgent:
 
     def analyze_crop_image_with_context(self, image_path, query_text="", target_language="hi", location_info=None):
         """
-        Enhanced image analysis.
-    
-        Key fix: the prompt is split into two explicit stages:
-        Stage 1 — IDENTIFY the crop strictly from image evidence.
-        Stage 2 — ADVISE based on that identification + weather/context.
-        This prevents the LLM from skipping identification and jumping straight
-        to generic crop advice.
+        Sends image DIRECTLY to Groq vision — no VQA evidence block.
+        The vision model sees the actual image and identifies the crop itself.
         """
         try:
             if not os.path.exists(image_path):
                 return f"Image file not found: {image_path}"
-    
+ 
             contextual_data = self.get_contextual_data(query_text, location_info)
-    
+ 
             lang_data = self.supported_languages.get(target_language, self.supported_languages['hi'])
             lang_name = lang_data['name']
-    
-            # Build weather context string
+ 
+            # Build weather context
             weather_context = ""
             if 'weather' in contextual_data and contextual_data['weather'].get('success'):
-                w  = contextual_data['weather']
+                w   = contextual_data['weather']
                 cur = w.get('current', {})
-                weather_context = f"""
-    CURRENT WEATHER (use this for advice):
-    Temperature : {cur.get('temperature', 'N/A')}°C
-    Humidity    : {cur.get('humidity', 'N/A')}%
-    Condition   : {cur.get('description', 'N/A')}
-    Wind speed  : {cur.get('wind_speed', 'N/A')} km/h
-    """.strip()
-    
-            # Language instruction map
+                weather_context = (
+                    f"CURRENT WEATHER:\n"
+                    f"  Temperature : {cur.get('temperature', 'N/A')}°C\n"
+                    f"  Humidity    : {cur.get('humidity', 'N/A')}%\n"
+                    f"  Condition   : {cur.get('description', 'N/A')}\n"
+                    f"  Wind speed  : {cur.get('wind_speed', 'N/A')} km/h"
+                )
+ 
             language_prompts = {
                 'hi': "Respond ENTIRELY in Hindi (हिन्दी). No English words.",
                 'mr': "Respond ENTIRELY in Marathi (मराठी). No English words.",
@@ -805,61 +798,53 @@ class MultilingualFarmerAgent:
                 'en': "Respond ENTIRELY in English.",
             }
             lang_instruction = language_prompts.get(target_language, "Respond ENTIRELY in English.")
-    
-            # ── Two-stage prompt ─────────────────────────────────────────────
-            enhanced_prompt = f"""
-    {lang_instruction}
-    
-    You are Krishi Mitra, an expert agricultural advisor for Indian farmers.
-    
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    STAGE 1 — CROP / PLANT IDENTIFICATION (mandatory first step)
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    • Identify the crop or plant STRICTLY from the image evidence supplied.
-    • If the image clearly shows a mango tree, say it is a mango tree.
-    • If the image clearly shows a banana plant, say it is a banana plant.
-    • Do NOT name any crop that is not visible in the image evidence.
-    • Do NOT default to soybean, wheat, rice, or any other crop as a guess.
-    • If the plant cannot be identified confidently, state that clearly.
-    
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    STAGE 2 — HEALTH ASSESSMENT & ADVICE
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    After identifying the crop, provide:
-    1. Visible health issues (spots, wilting, discolouration, pests)
-    2. Impact of current weather on this specific crop
-    3. Immediate actions the farmer should take
-    4. Preventive measures
-    
-    {weather_context}
-    
-    ━━━━━━━━━━━
-    FARMER SAID (in {lang_name}): "{query_text}"
-    ━━━━━━━━━━━
-    
-    Now write your full response in {lang_name}. Do not use * symbols.
-    """.strip()
-    
-            print("\n--- ENHANCED IMAGE PROMPT ---")
-            print(enhanced_prompt)
-            print("-----------------------------\n")
-    
-            response_text = self._generate_content(enhanced_prompt, image_path=image_path)
-    
-            # Fallback translation if response comes back as plain ASCII
+ 
+            # ── Clean prompt — NO "unable to determine" evidence block ──
+            prompt = f"""{lang_instruction}
+ 
+You are Krishi Mitra, an expert agricultural advisor for Indian farmers.
+You are looking at a photo sent by a farmer. Analyse it carefully.
+ 
+STEP 1 — IDENTIFY the plant or crop you can see in this image.
+  - Name it specifically (e.g. mango tree, tomato plant, rice crop, banana plant).
+  - Describe the visible leaves, fruit, flowers, or stems briefly.
+  - If the image is too blurry to identify, say so honestly.
+ 
+STEP 2 — HEALTH ASSESSMENT
+  - Describe any visible disease, pest damage, yellowing, spots, or wilting.
+  - If the plant looks healthy, say so.
+ 
+STEP 3 — ADVICE
+  - Give 3 to 5 practical actions the farmer should take right now.
+  - Consider the current weather conditions below.
+  - Be specific and actionable.
+ 
+{weather_context}
+ 
+Farmer's question (in {lang_name}): "{query_text}"
+ 
+Write your full response in {lang_name}. Do not use * symbols."""
+ 
+            print("\n--- IMAGE PROMPT (clean, no VQA block) ---")
+            print(prompt)
+            print("------------------------------------------\n")
+ 
+            # Pass image_path so _generate_content uses the vision model
+            response_text = self._generate_content(prompt, image_path=image_path)
+ 
+            # ASCII fallback translation
             if target_language != 'en' and response_text.isascii():
-                print(f"⚠️ Response is ASCII-only, attempting translation to {lang_name}")
+                print(f"⚠️ ASCII-only response, translating to {lang_name}...")
                 try:
-                    from deep_translator import GoogleTranslator
                     translated = GoogleTranslator(source='auto', target=target_language).translate(response_text)
                     return translated
                 except Exception:
                     return self.get_emergency_response(target_language)
-    
+ 
             return response_text
-    
+ 
         except Exception as e:
-            print(f"Error in enhanced image analysis: {e}")
+            print(f"Error in analyze_crop_image_with_context: {e}")
             return f"Error analyzing image: {e}"
 
     def get_emergency_response(self, language):
