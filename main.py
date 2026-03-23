@@ -847,7 +847,169 @@ Write your full response in {lang_name}. Do not use * symbols."""
         except Exception as e:
             print(f"Error in analyze_crop_image_with_context: {e}")
             return f"Error analyzing image: {e}"
-
+    
+    def detect_pest_and_disease(self, image_path, language_code="en"):
+        """
+        Analyses a crop image and returns structured pest/disease detection.
+        Returns a dict with: disease, confidence, remedy, preventive_measures
+        """
+        try:
+            if not os.path.exists(image_path):
+                return {
+                    "success": False,
+                    "error": "Image file not found"
+                }
+ 
+            lang_data = self.supported_languages.get(language_code, self.supported_languages['en'])
+            lang_name = lang_data['name']
+ 
+            language_prompts = {
+                'hi': "Respond ENTIRELY in Hindi (हिन्दी). No English words.",
+                'mr': "Respond ENTIRELY in Marathi (मराठी). No English words.",
+                'pa': "Respond ENTIRELY in Punjabi (ਪੰਜਾਬੀ). No English words.",
+                'kn': "Respond ENTIRELY in Kannada (ಕನ್ನಡ). No English words.",
+                'ta': "Respond ENTIRELY in Tamil (தமிழ்). No English words.",
+                'te': "Respond ENTIRELY in Telugu (తెలుగు). No English words.",
+                'ml': "Respond ENTIRELY in Malayalam (മലയാളം). No English words.",
+                'gu': "Respond ENTIRELY in Gujarati (ગુજરાતી). No English words.",
+                'bn': "Respond ENTIRELY in Bengali (বাংলা). No English words.",
+                'or': "Respond ENTIRELY in Odia (ଓଡ଼ିଆ). No English words.",
+                'ur': "Respond ENTIRELY in Urdu (اردو). No English words.",
+                'en': "Respond ENTIRELY in English.",
+            }
+            lang_instruction = language_prompts.get(language_code, "Respond ENTIRELY in English.")
+ 
+            prompt = f"""{lang_instruction}
+ 
+You are an expert agricultural plant pathologist and pest detection AI.
+Carefully examine the crop image provided.
+ 
+You MUST respond ONLY with a valid JSON object — no extra text, no markdown, no explanation outside the JSON.
+ 
+Analyse the image and return this exact JSON structure:
+ 
+{{
+  "disease": "<name of pest, disease, or condition — e.g. 'Aphid Infestation', 'Powdery Mildew', 'Leaf Blight', 'Healthy Plant'>",
+  "confidence": <float between 0.0 and 1.0 indicating how confident you are>,
+  "severity": "<one of: Low, Medium, High>",
+  "affected_part": "<which part is affected — e.g. 'Leaves', 'Stem', 'Roots', 'Fruit', 'Whole Plant'>",
+  "remedy": "<specific treatment steps the farmer should take immediately, written in {lang_name}>",
+  "preventive_measures": [
+    "<preventive tip 1 in {lang_name}>",
+    "<preventive tip 2 in {lang_name}>",
+    "<preventive tip 3 in {lang_name}>",
+    "<preventive tip 4 in {lang_name}>"
+  ],
+  "organic_remedy": "<organic or natural treatment alternative in {lang_name}>",
+  "urgency": "<one of: Monitor, Act Soon, Immediate Action Required>"
+}}
+ 
+Rules:
+- If the plant looks completely healthy, set disease to "Healthy Plant", confidence to 0.95, severity to "Low".
+- If the image is unclear or not a plant, set disease to "Unable to Analyse", confidence to 0.1.
+- ONLY output the JSON object. No text before or after it.
+- Do NOT wrap in markdown code blocks.
+"""
+ 
+            print(f"\n🔍 Running pest detection for language: {lang_name}")
+ 
+            # Use Groq vision model directly
+            with open(image_path, "rb") as f:
+                img_b64 = base64.b64encode(f.read()).decode("utf-8")
+ 
+            ext = os.path.splitext(image_path)[-1].lower()
+            mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
+                    "png": "image/png", "webp": "image/webp"}.get(ext.lstrip("."), "image/jpeg")
+ 
+            response = self.groq_client.chat.completions.create(
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                temperature=0.2,   # low temp for structured JSON output
+                max_tokens=1500,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an expert agricultural plant pathologist. "
+                            "You analyse crop images and return ONLY valid JSON — "
+                            "no markdown, no extra text, no explanation. "
+                            "Your JSON must be parseable by Python's json.loads()."
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{mime};base64,{img_b64}"}
+                            },
+                            {
+                                "type": "text",
+                                "text": prompt
+                            }
+                        ]
+                    }
+                ]
+            )
+ 
+            raw = response.choices[0].message.content.strip()
+            print(f"🤖 Raw model response:\n{raw}")
+ 
+            # Clean up in case model wraps in markdown
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            raw = raw.strip()
+ 
+            # Parse JSON
+            result = json.loads(raw)
+ 
+            # Validate required fields and add defaults for missing ones
+            result.setdefault("disease", "Unknown")
+            result.setdefault("confidence", 0.5)
+            result.setdefault("severity", "Medium")
+            result.setdefault("affected_part", "Unknown")
+            result.setdefault("remedy", "Consult your local agricultural officer.")
+            result.setdefault("preventive_measures", [])
+            result.setdefault("organic_remedy", "Not available")
+            result.setdefault("urgency", "Monitor")
+ 
+            # Clamp confidence between 0 and 1
+            result["confidence"] = max(0.0, min(1.0, float(result["confidence"])))
+ 
+            result["success"] = True
+            print(f"✅ Pest detection successful: {result['disease']} ({result['confidence']*100:.1f}%)")
+            return result
+ 
+        except json.JSONDecodeError as e:
+            print(f"❌ JSON parse error: {e}\nRaw response was: {raw}")
+            return {
+                "success": False,
+                "disease": "Analysis Error",
+                "confidence": 0.0,
+                "severity": "Unknown",
+                "affected_part": "Unknown",
+                "remedy": "Could not parse analysis. Please try with a clearer image.",
+                "preventive_measures": [],
+                "organic_remedy": "",
+                "urgency": "Monitor",
+                "error": f"JSON parse error: {e}"
+            }
+        except Exception as e:
+            print(f"❌ Pest detection error: {e}")
+            return {
+                "success": False,
+                "disease": "Detection Failed",
+                "confidence": 0.0,
+                "severity": "Unknown",
+                "affected_part": "Unknown",
+                "remedy": "Service temporarily unavailable. Please try again.",
+                "preventive_measures": [],
+                "organic_remedy": "",
+                "urgency": "Monitor",
+                "error": str(e)
+            }
+ 
     def get_emergency_response(self, language):
         """Emergency response when all else fails"""
         responses = {
@@ -1326,7 +1488,81 @@ def test_route():
         "routes": [str(rule) for rule in app.url_map.iter_rules()]
     }), 200
 
-
+@app.route('/api/pest-detection', methods=['POST', 'OPTIONS'])
+def pest_detection():
+    """
+    Pest and disease detection from crop image.
+    Flutter sends: { "image": "data:image/jpeg;base64,...", "language": "en" }
+    Returns: { disease, confidence, severity, remedy, preventive_measures, ... }
+    """
+ 
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "ok"}), 200
+ 
+    try:
+        print("=" * 60)
+        print("🔍 PEST DETECTION ENDPOINT HIT")
+        print("=" * 60)
+ 
+        data = request.json
+        if not data:
+            return jsonify({"error": "No data provided", "success": False}), 400
+ 
+        # Get language
+        language_name = data.get('language', 'English')
+        language_code = agent.get_language_code_from_name(language_name)
+        # If language_name is already a code (e.g. 'en', 'hi'), handle that too
+        if language_name in agent.supported_languages:
+            language_code = language_name
+ 
+        print(f"🌐 Language: {language_name} -> {language_code}")
+ 
+        # Decode image
+        image_data = data.get('image')
+        if not image_data:
+            return jsonify({"error": "No image provided", "success": False}), 400
+ 
+        try:
+            if ',' in image_data:
+                _, image_data = image_data.split(',', 1)
+            image_bytes = base64.b64decode(image_data)
+ 
+            timestamp = int(time.time() * 1000)
+            image_path = os.path.join(tempfile.gettempdir(), f"pest_{timestamp}.jpg")
+            with open(image_path, 'wb') as f:
+                f.write(image_bytes)
+ 
+            print(f"✅ Image saved: {image_path} ({len(image_bytes)} bytes)")
+        except Exception as e:
+            print(f"❌ Image decode error: {e}")
+            return jsonify({"error": f"Image processing failed: {e}", "success": False}), 400
+ 
+        # Run detection
+        print("🔄 Running pest detection...")
+        result = agent.detect_pest_and_disease(image_path, language_code)
+ 
+        # Cleanup temp file
+        try:
+            if os.path.exists(image_path):
+                os.unlink(image_path)
+        except Exception:
+            pass
+ 
+        print(f"✅ Detection complete: {result.get('disease', 'unknown')}")
+        return jsonify(result), 200
+ 
+    except Exception as e:
+        print(f"❌ Pest detection endpoint error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": f"Server error: {e}",
+            "disease": "Server Error",
+            "confidence": 0.0,
+            "remedy": "Please try again.",
+            "preventive_measures": []
+        }), 500
 # ====== START SERVER ======
 if __name__ == "__main__":
     print("\n" + "=" * 60)
